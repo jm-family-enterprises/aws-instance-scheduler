@@ -11,7 +11,6 @@
 #  and limitations under the License.                                                                                #
 ######################################################################################################################
 import os
-import time
 from datetime import timedelta
 
 import dateutil
@@ -148,7 +147,9 @@ class Ec2Service:
 
         self.schedules_with_hibernation = [s.name for s in config.schedules.values() if s.hibernate]
 
-        client = get_client_with_retries("ec2", ["describe_instances"], context=context, session=self._session, region=region)
+        ## DO THIS THOMAS
+        client = get_client_with_retries("ec2", ["describe_instances"], context=context, session=self._session,
+                                         region=region)
 
         def is_in_schedulable_state(ec2_inst):
             state = ec2_inst["state"] & 0xFF
@@ -173,9 +174,11 @@ class Ec2Service:
                 number_of_instances += 1
                 if is_in_schedulable_state(inst):
                     instances.append(inst)
-                    self._logger.debug(DEBUG_SELECTED_INSTANCE, inst[schedulers.INST_ID], inst[schedulers.INST_STATE_NAME])
+                    self._logger.debug(DEBUG_SELECTED_INSTANCE, inst[schedulers.INST_ID],
+                                       inst[schedulers.INST_STATE_NAME])
                 else:
-                    self._logger.debug(DEBUG_SKIPPED_INSTANCE, inst[schedulers.INST_ID], inst[schedulers.INST_STATE_NAME])
+                    self._logger.debug(DEBUG_SKIPPED_INSTANCE, inst[schedulers.INST_ID],
+                                       inst[schedulers.INST_STATE_NAME])
             if "NextToken" in ec2_resp:
                 args["NextToken"] = ec2_resp["NextToken"]
             else:
@@ -292,7 +295,8 @@ class Ec2Service:
             if schedule.use_maintenance_window and schedule.ssm_maintenance_window not in [None, ""]:
                 maintenance_window_schedule = self.ssm_maintenance_windows.get(schedule.ssm_maintenance_window, None)
                 if maintenance_window_schedule is None:
-                    self._logger.error(ERR_MAINT_WINDOW_NOT_FOUND_OR_DISABLED, schedule.ssm_maintenance_window, schedule.name)
+                    self._logger.error(ERR_MAINT_WINDOW_NOT_FOUND_OR_DISABLED, schedule.ssm_maintenance_window,
+                                       schedule.name)
                     self._ssm_maintenance_windows[schedule.ssm_maintenance_window] = "NOT-FOUND"
                 if maintenance_window_schedule == "NOT-FOUND":
                     maintenance_window_schedule = None
@@ -356,7 +360,11 @@ class Ec2Service:
                            t["Key"] not in stop_tags_key_names]
 
         methods = ["stop_instances", "create_tags", "delete_tags", "describe_instances"]
-        client = get_client_with_retries("ec2", methods=methods, context=self._context, session=self._session, region=self._region)
+        client = get_client_with_retries("ec2", methods=methods, context=self._context, session=self._session,
+                                         region=self._region)
+        autoscale_client = get_client_with_retries("autoscale", ["exit_standby"],
+                                                   context=self._context, session=self._session,
+                                                   region=self._region)
 
         for instance_batch in list(self.instance_batches(stopped_instances, STOP_BATCH_SIZE)):
 
@@ -374,6 +382,16 @@ class Ec2Service:
             try:
                 while len(hibernated) > 0:
                     try:
+                        for instance in hibernated:
+                            if 'aws:autoscaling:groupName' in instance.tags:
+                                self._logger.info('Instance is in autoscale group')
+                                autoscale_group_name = instance.tags.get('aws:autoscaling:groupname')
+                                autoscale_client.enter_standby(
+                                    InstanceIds=[instance.id],
+                                    AutoScalingGroupName=autoscale_group_name,
+                                    ShouldDecrementDesiredCapacity=False
+                                )
+
                         stop_resp = client.stop_instances_with_retries(InstanceIds=hibernated, Hibernate=True)
                         instances_stopping += [i["InstanceId"] for i in stop_resp.get("StoppingInstances", []) if
                                                is_in_stopping_state(i.get("CurrentState", {}).get("Code", ""))]
@@ -393,6 +411,16 @@ class Ec2Service:
 
                 if len(not_hibernated) > 0:
                     try:
+                        for instance in not_hibernated:
+                            if 'aws:autoscaling:groupName' in instance.tags:
+                                self._logger.info('Instance is in autoscale group')
+                                autoscale_group_name = instance.tags.get('aws:autoscaling:groupname')
+                                autoscale_client.enter_standby(
+                                    InstanceIds=[instance.id],
+                                    AutoScalingGroupName=autoscale_group_name,
+                                    ShouldDecrementDesiredCapacity=False
+                                )
+
                         stop_resp = client.stop_instances_with_retries(InstanceIds=not_hibernated, Hibernate=False)
                         instances_stopping += [i["InstanceId"] for i in stop_resp.get("StoppingInstances", []) if
                                                is_in_stopping_state(i.get("CurrentState", {}).get("Code", ""))]
@@ -452,11 +480,22 @@ class Ec2Service:
                           t["Key"] not in start_tags_key_names]
         client = get_client_with_retries("ec2", ["start_instances", "describe_instances", "create_tags", "delete_tags"],
                                          context=self._context, session=self._session, region=self._region)
-
+        autoscale_client = get_client_with_retries("autoscale", ["exit_standby"],
+                                                   context=self._context, session=self._session,
+                                                   region=self._region)
         for instance_batch in self.instance_batches(instances_to_start, START_BATCH_SIZE):
 
             instance_ids = [i.id for i in list(instance_batch)]
             try:
+                for instance in instances_to_start:
+                    if 'aws:autoscaling:groupName' in instance.tags:
+                        self._logger.info('Instance is in autoscale group')
+                        autoscale_group_name = instance.tags.get('aws:autoscaling:groupname')
+                        autoscale_client.exit_standby(
+                            InstanceIds=[instance.id],
+                            AutoScalingGroupName=autoscale_group_name
+                        )
+
                 start_resp = client.start_instances_with_retries(InstanceIds=instance_ids)
                 instances_starting = [i["InstanceId"] for i in start_resp.get("StartingInstances", []) if
                                       is_in_starting_state(i.get("CurrentState", {}).get("Code", ""))]
