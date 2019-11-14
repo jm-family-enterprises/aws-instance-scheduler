@@ -147,17 +147,17 @@ class Ec2Service:
 
         self.schedules_with_hibernation = [s.name for s in config.schedules.values() if s.hibernate]
 
-        ## DO THIS THOMAS
         client = get_client_with_retries("ec2", ["describe_instances"], context=context, session=self._session,
                                          region=region)
 
         def is_in_schedulable_state(ec2_inst):
             state = ec2_inst["state"] & 0xFF
             return state in Ec2Service.EC2_SCHEDULABLE_STATES
-
+# TODO: Remove it from the source.
         jmes = "Reservations[*].Instances[*].{InstanceId:InstanceId, EbsOptimized:EbsOptimized, Tags:Tags, " \
                "InstanceType:InstanceType,State:State}[]" + \
-               "|[?Tags]|[?contains(Tags[*].Key, '{}')]".format(tagname)
+               "|[?Tags]|[?contains(Tags[*].Key, '{}')]".format(tagname) + \
+               "|[?!(Tags[?Key=='aws:autoscaling:groupName'])]"
 
         args = {}
         number_of_instances = 0
@@ -345,33 +345,6 @@ class Ec2Service:
     # noinspection PyMethodMayBeStatic
     def stop_instances(self, kwargs):
 
-        def get_tags(instance_id):
-            c = get_client_with_retries("ec2", ["describe_instances"], context=self._context,
-                                        session=self._session,
-                                        region=self._region)
-            the_instance = c.describe_instances(InstanceIds=[instance_id])
-            tags = the_instance.get('Reservations')[0].get('Instances')[0].get('Tags')
-            tag_dict = {}
-            for tag in tags:
-                tag_dict[tag['Key']] = tag['Value']
-
-            return tag_dict
-
-        def is_asg_in_desired_state(autoscale_group_name, instance_id, desired_state):
-            c = get_client_with_retries("autoscaling", ["describe_auto_scaling_groups"], context=self._context,
-                                        session=self._session,
-                                        region=self._region)
-            response = c.describe_auto_scaling_groups(AutoScalingGroupNames=[autoscale_group_name])
-            instance_objects = response.get("AutoScalingGroups")[0].get("Instances")
-            self._logger.debug("Instance Object is {}".format(instance_objects))
-            for io in instance_objects:
-                self._logger.debug("io is {}".format(io))
-                self._logger.debug("instance in io is {}".format(io.get("InstanceId")))
-                if io.get("InstanceId") == instance_id:
-                    self._logger.debug("instance in state {}".format(io.get("LifecycleState")))
-                    return desired_state == io.get("LifecycleState")
-            return False
-
         def is_in_stopping_state(state):
             return (state & 0xFF) in Ec2Service.EC2_STOPPING_STATES
 
@@ -385,18 +358,15 @@ class Ec2Service:
 
         start_tags_keys = [{"Key": t["Key"]} for t in kwargs[schedulers.PARAM_CONFIG].started_tags if
                            t["Key"] not in stop_tags_key_names]
+# ec2Instance(id='i-01e2e3b0a2293ab83', schedule_name='stopped', hibernate=False, name='', state=16, state_name='running', allow_resize=True, resized=False, is_running=True, is_terminated=False, current_state='running', instancetype='t2.nano', tags={'aws:ec2launchtemplate:version': '1', 'isActive': 'true', 'Schedule': 'stopped', 'aws:autoscaling:groupName': 'test-group-2', 'aws:ec2launchtemplate:id': 'lt-0f9a6bd5de0a18177'}, maintenance_window=None, account='013247705526', region='us-east-1', service='ec2', instance_str='EC2:i-01e2e3b0a2293ab83')
 
         methods = ["stop_instances", "create_tags", "delete_tags", "describe_instances"]
         client = get_client_with_retries("ec2", methods=methods, context=self._context, session=self._session,
                                          region=self._region)
-        autoscale_client = get_client_with_retries("autoscaling", ["exit_standby", "describe_auto_scaling_groups"],
-                                                   context=self._context, session=self._session,
-                                                   region=self._region)
 
         for instance_batch in list(self.instance_batches(stopped_instances, STOP_BATCH_SIZE)):
             instance_ids = [i.id for i in instance_batch]
 
-            # split in hibernated and non hibernated, instanced that are stopped for resizing cannot be hibernated
             hibernated = [i.id for i in instance_batch if i.hibernate and not i.resized]
             not_hibernated = [i.id for i in instance_batch if i.id not in hibernated]
 
@@ -408,23 +378,6 @@ class Ec2Service:
             try:
                 while len(hibernated) > 0:
                     try:
-
-                        for instance in hibernated:
-                            tags = get_tags(instance)
-                            if 'aws:autoscaling:groupName' in tags.keys():
-                                autoscale_group_name = tags['aws:autoscaling:groupName']
-                                if not (is_asg_in_desired_state(autoscale_group_name, instance, "Standby")):
-                                    self._logger.debug(
-                                        'Instance is an autoscale member with groupName = {}'.format(
-                                            autoscale_group_name))
-                                    self._logger.debug(
-                                        'Instance in Autoscale Group Entering Standby for Scheduled Shutdown')
-                                    autoscale_client.enter_standby(
-                                        InstanceIds=[instance],
-                                        AutoScalingGroupName=autoscale_group_name,
-                                        ShouldDecrementDesiredCapacity=True
-                                    )
-
                         stop_resp = client.stop_instances_with_retries(InstanceIds=hibernated, Hibernate=True)
                         instances_stopping += [i["InstanceId"] for i in stop_resp.get("StoppingInstances", []) if
                                                is_in_stopping_state(i.get("CurrentState", {}).get("Code", ""))]
@@ -444,22 +397,6 @@ class Ec2Service:
                 # TODO: Add EnterStandby and ExitStandby to the rights of the role for the scheduler.
                 if len(not_hibernated) > 0:
                     try:
-                        for instance in not_hibernated:
-                            tags = get_tags(instance)
-                            if 'aws:autoscaling:groupName' in tags.keys():
-                                autoscale_group_name = tags['aws:autoscaling:groupName']
-                                if not (is_asg_in_desired_state(autoscale_group_name, instance, "Standby")):
-                                    self._logger.debug(
-                                        'Instance is an autoscale member with groupName = {}'.format(
-                                            autoscale_group_name))
-                                    self._logger.debug(
-                                        'Instance in Autoscale Group Entering Standby for Scheduled Shutdown')
-                                    autoscale_client.enter_standby(
-                                        InstanceIds=[instance],
-                                        AutoScalingGroupName=autoscale_group_name,
-                                        ShouldDecrementDesiredCapacity=True
-                                    )
-
                         stop_resp = client.stop_instances_with_retries(InstanceIds=not_hibernated, Hibernate=False)
                         instances_stopping += [i["InstanceId"] for i in stop_resp.get("StoppingInstances", []) if
                                                is_in_stopping_state(i.get("CurrentState", {}).get("Code", ""))]
@@ -505,33 +442,6 @@ class Ec2Service:
     # noinspection PyMethodMayBeStatic
     def start_instances(self, kwargs):
 
-        def get_tags(instance_id):
-            c = get_client_with_retries("ec2", ["describe_instances"], context=self._context,
-                                        session=self._session,
-                                        region=self._region)
-            the_instance = c.describe_instances(InstanceIds=[instance_id])
-            tags = the_instance.get('Reservations')[0].get('Instances')[0].get('Tags')
-            tag_dict = {}
-            for tag in tags:
-                tag_dict[tag['Key']] = tag['Value']
-
-            return tag_dict
-
-        def is_asg_in_desired_state(autoscale_group_name, instance_id, desired_state):
-            c = get_client_with_retries("autoscaling", ["describe_auto_scaling_groups"], context=self._context,
-                                        session=self._session,
-                                        region=self._region)
-            response = c.describe_auto_scaling_groups(AutoScalingGroupNames=[autoscale_group_name])
-            instance_objects = response.get("AutoScalingGroups")[0].get("Instances")
-            self._logger.debug("Instance Object is {}".format(instance_objects))
-            for io in instance_objects:
-                self._logger.debug("io is {}".format(io))
-                self._logger.debug("instance in io is {}".format(io.get("InstanceId")))
-                if io.get("InstanceId") == instance_id:
-                    self._logger.debug("instance in state {}".format(io.get("LifecycleState")))
-                    return desired_state == io.get("LifecycleState")
-            return False
-
         def is_in_starting_state(state):
             return (state & 0xFF) in Ec2Service.EC2_STARTING_STATES
 
@@ -546,30 +456,15 @@ class Ec2Service:
                           t["Key"] not in start_tags_key_names]
         client = get_client_with_retries("ec2", ["start_instances", "describe_instances", "create_tags", "delete_tags"],
                                          context=self._context, session=self._session, region=self._region)
-        autoscale_client = get_client_with_retries("autoscaling", ["exit_standby"],
-                                                   context=self._context, session=self._session,
-                                                   region=self._region)
-        for instance_batch in self.instance_batches(instances_to_start, START_BATCH_SIZE):
 
-            instance_ids = [i.id for i in list(instance_batch)]
+        for instance_batch in self.instance_batches(instances_to_start, START_BATCH_SIZE):
+            instance_ids = [i.id for i in instance_batch]
             try:
                 self._logger.debug("Instance IDS {}".format(instance_ids))
                 start_resp = client.start_instances_with_retries(InstanceIds=instance_ids)
                 instances_starting = [i["InstanceId"] for i in start_resp.get("StartingInstances", []) if
                                       is_in_starting_state(i.get("CurrentState", {}).get("Code", ""))]
 
-                for instance in instance_ids:
-                    tags = get_tags(instance)
-                    if 'aws:autoscaling:groupName' in tags.keys():
-                        autoscale_group_name = tags['aws:autoscaling:groupName']
-                        if not (is_asg_in_desired_state(autoscale_group_name, instance, "InService")):
-                            self._logger.debug(
-                                'Instance is an autoscale member with groupName = {}'.format(autoscale_group_name))
-                            self._logger.debug('Instance in Autoscale Group Entering Standby for Scheduled Shutdown')
-                            autoscale_client.exit_standby(
-                                InstanceIds=[instance],
-                                AutoScalingGroupName=autoscale_group_name
-                            )
                 get_status_count = 0
                 if len(instances_starting) < len(instance_ids):
                     time.sleep(5)
