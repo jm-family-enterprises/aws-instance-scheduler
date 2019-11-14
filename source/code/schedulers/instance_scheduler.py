@@ -334,13 +334,25 @@ class InstanceScheduler:
             self._instance_states.save()
 
             # build output structure, hold started, stopped and resized instances per region
+
+            print('start_list [{}]'.format(self._scheduler_start_list))
+            print('stop_list [{}]'.format(self._scheduler_stop_list))
+
+            asg_start_list = [i.id for i in self._scheduler_start_list if 'aws:autoscaling:groupName' in i.tags.keys()]
+            asg_stop_list = [i.id for i in self._scheduler_stop_list if 'aws:autoscaling:groupName' in i.tags.keys()]
+            asg_resize_list = [i.id for i in self._schedule_resize_list if 'aws:autoscaling:groupName' in i.tags.keys()]
+
+            asg_instance_ids = asg_start_list + asg_stop_list + asg_resize_list
+            self._logger.info('Skipping the instances that are in an auto scale group: [{}]'.format(asg_instance_ids))
+            #TODO: Fix the bug of the resize name not matching the other start and stop list names
             if len(self._scheduler_start_list) > 0:
-                started_instances[region] = [{i.id: {"schedule": i.schedule_name}} for i in self._scheduler_start_list]
+                started_instances[region] = [{i.id: {"schedule": i.schedule_name}} for i in self._scheduler_start_list if i.id not in asg_instance_ids]
             if len(self._scheduler_stop_list):
-                stopped_instances[region] = [{i.id: {"schedule": i.schedule_name}} for i in self._scheduler_stop_list]
+                print('STOP LIST {}'.format(self._scheduler_stop_list))
+                stopped_instances[region] = [{i.id: {"schedule": i.schedule_name}} for i in self._scheduler_stop_list if i.id not in asg_instance_ids]
             if len(self._schedule_resize_list) > 0:
                 resized_instances[region] = [{i[0].id: {"schedule": i[0].schedule_name, "old": i[0].instancetype, "new": i[1]}} for
-                                             i in self._schedule_resize_list]
+                                             i in self._schedule_resize_list if i.id not in asg_instance_ids]
             if allow_send_metrics():
                 self._collect_usage_metrics()
 

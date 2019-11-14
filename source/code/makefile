@@ -31,6 +31,7 @@ zip_cli = $(regional_assets_dir)/scheduler-cli.zip
 templates=$(wildcard ../../deployment/*.template)
 
 pwd=`pwd`
+# prefix=$(solution/$version)"
 
 build: lambda scheduler-cli  cfn
 
@@ -52,9 +53,8 @@ lambda:$(py) main.py version.txt
 	rm version.py
 	mv version.py.org version.py
 	zip -r $(zip)  $(py)  version.txt
-	zip -r $(zip) models
+	zip -r $(zip) models pytz
 
-	zip -r $(zip) pytz
 
 
 ######################################################################################################################
@@ -80,6 +80,7 @@ scheduler-cli:$(pycli) version.txt
 	rm cli/version.txt
 	rm cli/setup.py
 	mv cli/setup.org cli/setup.py
+	cp $(zip_cli) $(deployment)
 
 
 ######################################################################################################################
@@ -102,16 +103,16 @@ cfn:version.txt $(templates)
 # Deploy to S3                                                                                                       #
 ######################################################################################################################
 
-deploy: lambda cfn scheduler-cli
-	aws s3 cp $(deployment)/instance-scheduler-latest.template $(s3bucket)$(prefix)  --acl public-read
-	aws s3 cp $(deployment)/instance-scheduler-latest.template $(s3bucket)  --acl public-read
+deploy: #lambda cfn scheduler-cli
+	aws s3 cp $(global_assets_dir)/instance-scheduler.template $(s3bucket)$(prefix)  #--acl public-read
+	aws s3 cp $(global_assets_dir)/instance-scheduler.template $(s3bucket)  #--acl public-read
 
-	aws s3 cp $(deployment)/instance-scheduler-remote-latest.template $(s3bucket)$(prefix)  --acl public-read
-	aws s3 cp $(deployment)/instance-scheduler-remote-latest.template $(s3bucket)  --acl public-read
+	aws s3 cp $(global_assets_dir)/instance-scheduler-remote.template $(s3bucket)$(prefix)  #--acl public-read
+	aws s3 cp $(global_assets_dir)/instance-scheduler-remote.template $(s3bucket)  #--acl public-read
 
-	aws s3 cp $(zip) $(s3bucket)$/$(prefix)  --acl public-read
-	aws s3 cp $(zip_cli) $(s3bucket)$(prefix) --acl public-read
-	aws s3 cp $(deployment)/scheduler-cli-latest.zip $(s3bucket) --acl public-read
+	aws s3 cp $(zip) $(s3bucket)$/$(prefix)  #--acl public-read
+	aws s3 cp $(zip_cli) $(s3bucket)$(prefix) #--acl public-read
+	aws s3 cp $(deployment)/scheduler-cli.zip $(s3bucket) #--acl public-read
 
 	python update-build-number.py version.txt
 
