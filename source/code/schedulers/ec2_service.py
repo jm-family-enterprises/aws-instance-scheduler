@@ -11,7 +11,6 @@
 #  and limitations under the License.                                                                                #
 ######################################################################################################################
 import os
-import time
 from datetime import timedelta
 
 import dateutil
@@ -156,6 +155,7 @@ class Ec2Service:
 
         jmes = "Reservations[*].Instances[*].{InstanceId:InstanceId, EbsOptimized:EbsOptimized, Tags:Tags, " \
                "InstanceType:InstanceType,State:State}[]" + \
+               "|[?!(Tags[?Key=='aws:autoscaling:groupName'])]" + \
                "|[?Tags]|[?contains(Tags[*].Key, '{}')]".format(tagname)
 
         args = {}
